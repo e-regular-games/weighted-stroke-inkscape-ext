@@ -47,7 +47,15 @@ Y=1
 
 M=0 # y = Mx+b
 B=1 # y = Mx+b
-RES = 3
+RES = 4
+
+# rats(inv(M*T)) where T = [t=0, t=1/3, t=2/3, t=1]
+# note P*Q = C, where C is the control points of the bezier
+# and P are the points on the curve. 
+Q = np.array([[1.0, -5.0/6.0,  1.0/3.0, 0.0],
+              [0.0,      3.0, -3.0/2.0, 0.0],
+              [0.0, -3.0/2.0,      3.0, 0.0],
+              [0.0,  1.0/3.0, -5.0/6.0, 1.0]])
 
 def root_wrapper_3(root_a, root_b, root_c, root_d, dbg):
     roots = np.zeros(root_a.shape + (3,), dtype=np.cdouble)
@@ -150,7 +158,7 @@ def root_wrapper(root_a, root_b, root_c, root_d, dbg):
 class MakeRedExtension(inkex.EffectExtension):
     """Please rename this class, don't keep it unnamed"""
     def add_arguments(self, pars):
-        pars.add_argument("--weight_pct", type=float,\
+        pars.add_argument("--weight", type=float,\
             help="The boldness percentage to increase or decrease the path weight.")
         pars.add_argument("--debug", type=inkex.Boolean, help="Render debug lines and points.", default=False)
         pars.add_argument("--straight", type=inkex.Boolean, help="Keep straight lines straight.", default=False)
@@ -212,6 +220,22 @@ class MakeRedExtension(inkex.EffectExtension):
             + cubics[:,:,1:2] * np.power(t, 2) \
             + cubics[:,:,2:3] * t \
             + cubics[:,:,3:4]
+
+    def _slope_coefficients(self, slopes):
+        # slopes -> [x/y, N]
+        def_slope = slopes[Y,:] != 0
+        inf_slope = np.logical_and(np.logical_not(def_slope), slopes[X,:] != 0)
+        dne = np.logical_and(slopes[X,:] == 0, slopes[Y,:] == 0)
+        coef1 = np.ones((1,slopes.shape[1],))
+        coef2 = np.ones((1,slopes.shape[1],))
+        
+        coef1[0,def_slope] = slopes[X,def_slope] / slopes[Y,def_slope]
+        coef1[0,dne] = 0.0
+        coef2[0,inf_slope] = slopes[Y,inf_slope] / slopes[X,inf_slope]
+        coef2[0,dne] = 0.0
+
+        return coef1, coef2
+        
     
     def _intersections_closest(self, lines, cubics):
         """
@@ -227,14 +251,8 @@ class MakeRedExtension(inkex.EffectExtension):
 
         I = 3 # intersects
         TOL = 0.00001
-        def_slope = lines[Y,:,M] != 0
-        inf_slope = np.logical_not(def_slope)
-        coef1 = np.ones((1,lines.shape[1],))
-        coef2 = np.ones((1,lines.shape[1],))
+        coef1, coef2 = self._slope_coefficients(lines[...,M])
         
-        coef1[0,def_slope] = lines[X,def_slope,M] / lines[Y,def_slope,M]
-        coef2[0,inf_slope] = lines[Y,inf_slope,M] / lines[X,inf_slope,M]
-
         # cubic intersection coefficients
         a = coef1 * cubics[Y,:,0:1] - coef2 * cubics[X,:,0:1]
         b = coef1 * cubics[Y,:,1:2] - coef2 * cubics[X,:,1:2]
@@ -267,10 +285,17 @@ class MakeRedExtension(inkex.EffectExtension):
         points = lines[:,on_line_exp,B]
 
         dist = np.zeros((roots_exp.shape[0],))
-        diff = points[:,valid_exp] - intersects[:,valid_exp]
-        dist[valid_exp] = np.sqrt(diff[0]*diff[0] + diff[1]*diff[1])
+        diff = intersects[:,valid_exp] - points[:,valid_exp]
 
-        valid_exp = np.logical_and(valid_exp, dist > TOL)
+        lines_slope_sign = np.sign(lines[:,:,M])
+        diff_slope_sign = np.sign(diff)
+        inside_shape = np.full(valid_exp.shape, False)
+        inside_shape[valid_exp] = \
+            np.logical_and(diff_slope_sign[0] == lines_slope_sign[0,on_line_exp[valid_exp]],
+                           diff_slope_sign[1] == lines_slope_sign[1,on_line_exp[valid_exp]])
+
+        dist[valid_exp] = np.sqrt(diff[0]*diff[0] + diff[1]*diff[1])
+        valid_exp = np.logical_and(np.logical_and(valid_exp, dist > TOL), inside_shape)
 
         valid_sort_shaped = (1.0 - valid_exp).reshape((lines.shape[1], I * cubics.shape[1]))
         dist_shaped = dist.reshape((lines.shape[1], I * cubics.shape[1]))
@@ -323,7 +348,8 @@ class MakeRedExtension(inkex.EffectExtension):
     def _generate_ref_lines(self, cubics, linear):
         t = np.linspace(0.0, 1.0, num=RES)
         
-        angles = self._angle_between_curves(cubics)
+        #angles = self._angle_between_curves(cubics)
+        angles = np.zeros((cubics.shape[1],1))
         slopes = self._slope_at_t(cubics, t)
         points = self._point_at_t(cubics, t)
 
@@ -350,23 +376,30 @@ class MakeRedExtension(inkex.EffectExtension):
             to_calc[linear] = np.logical_and(to_calc[linear], f)
         
         points = points.reshape((2, points.shape[1] * RES))
+        on_cubic = (np.ones((1,RES)) * np.arange(0, cubics.shape[1]).reshape((-1,1))).reshape((RES*cubics.shape[1],))
         orthogonals = orthogonals.reshape((2, orthogonals.shape[1] * RES))
         to_calc = to_calc.reshape((to_calc.shape[0] * RES,))
 
-        t_full = t.reshape((1,t.shape[0])) * np.ones((cubics.shape[1],1)) 
-        t_full = t_full.reshape((1,t_full.shape[0] * RES))
+        #t_full = t.reshape((1,t.shape[0])) * np.ones((cubics.shape[1],1)) 
+        #t_full = t_full.reshape((1,t_full.shape[0] * RES))
         
-        return t_full[:,to_calc], points[:,to_calc], orthogonals[:,to_calc]
-        
+        return points[:,to_calc], orthogonals[:,to_calc], on_cubic[to_calc]
+
+    def _outline(self, points, intersects):
+        diff = intersects - points
+        dist = np.sqrt(diff[0]*diff[0] + diff[1]*diff[1])
+
+        delta = -1.0 * diff * self.options.weight / np.max(dist)
+        return points + delta
         
     def effect(self):
-        self._msg(self.options.straight)
         for node in self.svg.selection.filter_nonzero(inkex.PathElement):
             abs_path = node.path.to_absolute()
             beziers, linear = self._curves_matrix(abs_path)
             cubics = self._to_cubics(beziers)
 
-            t, points, orthogonals = self._generate_ref_lines(cubics, linear)
+            self._msg(cubics)
+            points, orthogonals, on_cubic = self._generate_ref_lines(cubics, linear)
 
             lines = np.zeros((2, orthogonals.shape[1], 2)) # [x/y, n, m/b]
             lines[X,:,M] = orthogonals[X]
@@ -375,7 +408,6 @@ class MakeRedExtension(inkex.EffectExtension):
             lines[Y,:,B] = points[Y]
 
             points, intersects, line_map = self._intersections_closest(lines, cubics)
-            t = t[:,line_map]
 
             group = node.getparent().add(inkex.Group())
             points_t = points.transpose()
@@ -384,7 +416,27 @@ class MakeRedExtension(inkex.EffectExtension):
             if self.options.debug:
                 for p in range(points_t.shape[0]):
                     group.add(self._make_line(points_t[p], intersects_t[p]))
-            
+
+            outline = self._outline(points, intersects)
+            elem = inkex.PathElement()
+            p = [Move(outline[0,0], outline[1,0])]
+            prev = outline[:,0:1]
+            for i in range(1,cubics.shape[1]):
+                pts = on_cubic == i
+                otl = outline[:,pts]
+                if np.count_nonzero(pts) == 1:
+                    p.append(Line(otl[0,0], otl[1,0]))
+                elif np.count_nonzero(pts) == 3:
+                    # use prev and the 3 points below to compute the bezier curve.
+                    # the points below are on the curve, not the actual control points.
+                    P = np.concatenate([prev, otl], axis=1) @ Q
+                    p.append(Curve(P[0,1], P[1,1], P[0,2], P[1,2], P[0,3], P[1,3]))
+                prev = otl[:,-1:]
+
+            p.append(ZoneClose())
+            elem.path = inkex.Path(p)
+            elem.style.set_color('#FF0000', 'fill')
+            node.getparent().add(elem)
             
             
             
