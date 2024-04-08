@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <inkscape-extension xmlns="http://www.inkscape.org/namespace/inkscape/extension">
-  <name>Make Red Extension</name>
-  <id>org.inkscape.tutorial.make_red_extension</id>
+  <name>Weighted Stroke</name>
+  <id>com.erg.weighted_stroke</id>
   <param name="weight" type="float" gui-text="Weight(px):">1.0</param>
-  <param name="straight" type="bool" gui-text="Maintain straight lines">true</param>
+  <param name="shrink" type="bool" gui-text="Shrink">false</param>
   <param name="debug" type="bool" gui-text="Debug">false</param>
   <effect>
     <!--object-type>path</object-type-->
@@ -12,6 +12,6 @@
     </effects-menu>
   </effect>
   <script>
-    <command location="inx" interpreter="python">make_it_red.py</command>
+    <command location="inx" interpreter="python">weighted_stroke.py</command>
   </script>
 </inkscape-extension>

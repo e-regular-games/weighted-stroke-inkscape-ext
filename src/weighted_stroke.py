@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding=utf-8
 #
-# Copyright (C) [YEAR] [YOUR NAME], [YOUR EMAIL]
+# Copyright (C) 2024, E-Regular Games, e.regular.games.llc@gmail.com
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -100,7 +100,7 @@ def root_wrapper_3(root_a, root_b, root_c, root_d, dbg):
     roots[...,2] = -1.0 / 3 * (mono_a + w2 * m1 + w1 * n1)
 
     valid = np.logical_and(np.imag(roots) == 0, np.logical_and(np.real(roots) >= 0, np.real(roots) <= 1))
-    #roots[np.logical_not(valid)] = 0.0
+    roots[np.logical_not(valid)] = 0.0
     
     return np.real(roots), valid
 
@@ -119,15 +119,15 @@ def root_wrapper_2(root_b, root_c, root_d):
     valid[roots_1,0:1] = 1
 
     valid = np.logical_and(valid, np.logical_and(np.imag(roots) == 0, np.logical_and(np.real(roots) >= 0, np.real(roots) <= 1)))
-    #roots[np.logical_not(valid)] = 0.0
+    roots[np.logical_not(valid)] = 0.0
     
     return roots, valid
 
 def root_wrapper_1(root_c, root_d):
     roots = -root_d / root_c
     valid = np.logical_and(roots >= 0, roots <= 1)
-    #roots[np.logical_not(valid)] = 0.0
-    return roots, valid
+    roots[np.logical_not(valid)] = 0.0
+    return roots.reshape((-1,1)), valid.reshape((-1,1))
 
 def root_wrapper(root_a, root_b, root_c, root_d, dbg):
     """Get the Cubic function, moic formular of roots, simple root"""
@@ -158,13 +158,13 @@ def root_wrapper(root_a, root_b, root_c, root_d, dbg):
 
     return roots, valid
 
-class MakeRedExtension(inkex.EffectExtension):
+class WeightedStroke(inkex.EffectExtension):
     """Please rename this class, don't keep it unnamed"""
     def add_arguments(self, pars):
         pars.add_argument("--weight", type=float,\
             help="The boldness percentage to increase or decrease the path weight.")
         pars.add_argument("--debug", type=inkex.Boolean, help="Render debug lines and points.", default=False)
-        pars.add_argument("--straight", type=inkex.Boolean, help="Keep straight lines straight.", default=False)
+        pars.add_argument("--shrink", type=inkex.Boolean, help="Shrink the shape.", default=False)
 
         
     def _to_cubics(self, beziers):
@@ -177,14 +177,14 @@ class MakeRedExtension(inkex.EffectExtension):
 
     def dist(self, x0, y0, x1, y1):
         return math.sqrt((x0-x1)*(x0-x1) + (y0-y1)*(y0-y1))
-    
+
+    # turn all paths into bezier curves, including lines, verticals, horizontals, and half-line/half-curve.
     def _curves_matrix(self, abs_path):
         reset_origin = True
         beziers = np.zeros((2, len(abs_path), 4))
         linear = np.full((len(abs_path),), False)
         i = 0
         for cmd_proxy in abs_path.proxy_iterator():
-            self._msg(cmd_proxy)
             # for each subpath, reset the origin of the following computations to the first
             # node of the subpath -> i.e. after a Z command, move the origin to the end point
             # of the next command
@@ -231,9 +231,26 @@ class MakeRedExtension(inkex.EffectExtension):
                     i += 1
         return beziers[:,:i], linear[:i]
 
-    def _slope_at_t(self, cubics, t):
-        return 3 * cubics[:,:,0:1] * np.power(t, 2) + 2 * cubics[:,:,1:2] * t + cubics[:,:,2:3]
+    def _slope_at_t(self, beziers, cubics, t):
+        # generic result, good for t != 0 and t != 1.
+        m = 3 * cubics[:,:,0:1] * np.power(t, 2) + 2 * cubics[:,:,1:2] * t + cubics[:,:,2:3]
+        
+        replace_m0 = t == 0
+        if np.any(replace_m0):
+            pf = beziers[:,:,1:2]
+            fixed = np.all(beziers[:,:,1:2] == beziers[:,:,0:1], axis=0)[:,0]
+            pf[:,fixed] = beziers[:,fixed,2:3]
+            m[:,:,replace_m0] = pf - beziers[:,:,0:1]
 
+            replace_m1 = t == 1
+        if np.any(replace_m1):
+            pi = beziers[:,:,2:3]
+            fixed = np.all(beziers[:,:,3:4] == beziers[:,:,2:3], axis=0)[:,0]
+            pi[:,fixed] = beziers[:,fixed,1:2]
+            m[:,:,replace_m1] = beziers[:,:,3:4] - pi
+
+        return m
+        
     def _point_at_t(self, cubics, t):
         return cubics[:,:,0:1] * np.power(t, 3) \
             + cubics[:,:,1:2] * np.power(t, 2) \
@@ -364,10 +381,10 @@ class MakeRedExtension(inkex.EffectExtension):
         v[Y] = v[Y] / mag
         return v
 
-    def _generate_ref_lines(self, cubics, linear):
+    def _generate_ref_lines(self, beziers, cubics, linear):
         t = np.linspace(0.0, 1.0, num=RES)
 
-        slopes = self._slope_at_t(cubics, t)
+        slopes = self._slope_at_t(beziers, cubics, t)
         points = self._point_at_t(cubics, t)
 
         orthogonals = np.zeros(slopes.shape)
@@ -379,7 +396,6 @@ class MakeRedExtension(inkex.EffectExtension):
         flats = np.full((orthogonals.shape[1],1), False)
         flats[:-1,0] = np.all(np.abs(orthogonals[:,:-1,-1] - orthogonals[:,1:,0]) < TOL, axis=0)
         flats[-1,0] = np.all(np.abs(orthogonals[:,-1,-1] - orthogonals[:,0,0]) < TOL, axis=0)
-        self._msg(flats)
         
         to_calc = np.full((points.shape[1],RES), True)
         to_calc[:, 0] = False
@@ -390,35 +406,34 @@ class MakeRedExtension(inkex.EffectExtension):
         orthogonals[:,0,0] = orthogonals[:,-1,-1]
         orthogonals = self._norm(orthogonals)
 
-        if self.options.straight:
-            # for lines: only look at first and last point, if straight is enabled.
-            f = np.full((RES,),False)
-            f[0] = True
-            f[RES-1] = True
-            to_calc[linear] = np.logical_and(to_calc[linear], f)
+        f = np.full((RES,),False)
+        f[0] = True
+        f[RES-1] = True
+        to_calc[linear] = np.logical_and(to_calc[linear], f)
         
         points = points.reshape((2, points.shape[1] * RES))
         on_cubic = (np.ones((1,RES)) * np.arange(0, cubics.shape[1]).reshape((-1,1))).reshape((RES*cubics.shape[1],))
         orthogonals = orthogonals.reshape((2, orthogonals.shape[1] * RES))
         to_calc = to_calc.reshape((to_calc.shape[0] * RES,))
 
-        return points[:,to_calc], orthogonals[:,to_calc], on_cubic[to_calc]
+        return points[:,to_calc], orthogonals[:,to_calc], on_cubic[to_calc], flats
 
     def _outline(self, points, intersects):
         diff = intersects - points
         dist = np.sqrt(diff[0]*diff[0] + diff[1]*diff[1])
         
         delta = -1.0 * diff * self.options.weight / np.max(dist)
+        if self.options.shrink:
+            delta *= -1
         return points + delta
         
     def effect(self):
         for node in self.svg.selection.filter_nonzero(inkex.PathElement):
             abs_path = node.path.to_absolute()
             beziers, linear = self._curves_matrix(abs_path)
-            self._msg(beziers)
             cubics = self._to_cubics(beziers)
 
-            points, orthogonals, on_cubic = self._generate_ref_lines(cubics, linear)
+            points, orthogonals, on_cubic, flats = self._generate_ref_lines(beziers, cubics, linear)
             
             lines = np.zeros((2, orthogonals.shape[1], 2)) # [x/y, n, m/b]
             lines[X,:,M] = orthogonals[X]
@@ -441,29 +456,70 @@ class MakeRedExtension(inkex.EffectExtension):
             p = []
             prev = None
 
-            for i in range(cubics.shape[1]):
-                otl = outline[:,on_cubic == i]
-                
-                if prev is None:
-                    prev = otl[:,0:1]
-                    p.append(Move(otl[0,0], otl[1,0]))
-                    otl = otl[:,1:]
-
-                if otl.shape[1] == 1:
-                    p.append(Line(otl[0,0], otl[1,0]))
-                elif otl.shape[1] == 3:
-                    # use prev and the 3 points below to compute the bezier curve.
-                    # the points below are on the curve, not the actual control points.
-                    P = np.concatenate([prev, otl], axis=1) @ Q
-                    p.append(Curve(P[0,1], P[1,1], P[0,2], P[1,2], P[0,3], P[1,3]))
-                prev = otl[:,-1:]
-
-            p.append(ZoneClose())
-            elem.path = inkex.Path(p)
+            path = self._make_path(cubics.shape[1], on_cubic, outline, flats)
+            elem.path = inkex.Path(path)
             elem.style.set_color('#FF0000', 'fill')
             node.getparent().add(elem)
-            
-            
+
+    def _match_slopes(self, s, p):
+        wi = np.array([[20, 7], [7, 20]])
+        wj = np.linalg.inv([[12, 6], [-6, -12]])
+        pi = np.concatenate([p[:,1:2], p[:,2:3]], axis=1)
+        pj = np.concatenate([p[:,0:1], p[:,3:4]], axis=1)
+        K = np.linalg.inv(s) @ (27 * pi - pj @ wi) @ wj
+        return np.concatenate([p[:,0:1], p[:,0:1] + K[0,0] * s[:,0:1], p[:,3:4] - K[1,1] * s[:,1:2], p[:,3:4]], axis=1)
+
+    def _slope(self, prev, points):
+        if points.shape[1] == 1:
+            s = points[:,0:1] - prev
+            return np.concatenate([s, s], axis=1)
+        if points.shape[1] == 3:
+            # find control points.
+            C = np.concatenate([prev, points], axis=1) @ Q
+            return np.concatenate([C[:,1:2] - C[:,0:1], C[:,3:4] - C[:,2:3]], axis=1)
+        
+    def _make_path(self, n, on_cubic, outline, flats):        
+        prev_p = None
+        p = []
+
+        slopes = np.zeros((n,2,2))
+        for i in range(n):
+            otl = outline[:,on_cubic == i]
+                
+            if prev_p is None:
+                prev_p = otl[:,0:1]
+                otl = otl[:,1:]
+
+            slopes[i,:,:] = self._slope(prev_p, otl)
+            prev_p = otl[:,-1:]
+
+        prev_p = None
+        for i in range(n):
+            otl = outline[:,on_cubic == i]
+                
+            if prev_p is None:
+                prev_p = otl[:,0:1]
+                p.append(Move(otl[0,0], otl[1,0]))
+                otl = otl[:,1:]
+
+            if otl.shape[1] == 1:
+                p.append(Line(otl[0,0], otl[1,0]))
+            elif otl.shape[1] == 3:
+                # use prev and the 3 points below to compute the bezier curve.
+                # the points below are on the curve, not the actual control points.
+                s = slopes[i,:,:].copy()
+                if flats[(i-1)%n]:
+                    s[:,0:1] = (s[:,0:1] + slopes[(i-1)%n,:,1:2]) / 2
+                if flats[i]:
+                    s[:,1:2] = (s[:,1:2] + slopes[(i+1)%n,:,0:1]) / 2
+
+                P = self._match_slopes(s, np.concatenate([prev_p, otl], axis=1))
+                p.append(Curve(P[0,1], P[1,1], P[0,2], P[1,2], P[0,3], P[1,3]))
+            prev_p = otl[:,-1:]
+
+        p.append(ZoneClose())
+        return p
+        
             
 if __name__ == '__main__':
-    MakeRedExtension().run()
+    WeightedStroke().run()
